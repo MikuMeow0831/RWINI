@@ -1,247 +1,267 @@
-package com.eam.shuangx339.ModTranslater; 
-import android.util.Log;
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.io.RandomAccessFile;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.LinkedList;
-import java.util.Map;
-import java.util.Objects;
+import java.io.Serializable;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
 
-public class RWINI implements Serializable {
-    public File INIFile;
-    public File MetaFile;    
-    public String MetaDir;
-    public boolean isMeedTran=false;
-    volatile LinkedHashMap<String,LinkedHashMap<String,Long>> KnotList;   
-    ArrayList<String> allkeys=new ArrayList<>(),allvalues=new ArrayList<>();    
-    RandomAccessFile db;
-    public RWINI(File INIFile, String projectpath, String Meta) throws FileNotFoundException, IOException {
-        this.INIFile = INIFile;
-        this.MetaDir = FilesHandler.MetaDir;
-        MetaFile = new File(MetaDir + projectpath + "/" + Meta.replace(".ini", ".meta"));
-        db = new RandomAccessFile(INIFile, "rw");        
+class RWINI implements Serializable {
 
-        if (MetaFile.exists()) {
-            loadMeta();
-        } else {
-            MetaFile.getParentFile().mkdirs();   
-            MetaFile.createNewFile();
-            init();
-        }
-    }
-    private void loadMeta() throws IOException {
-        DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(MetaFile)));
-        KnotList = new LinkedHashMap<>();
-        try {
-            LinkedHashMap<String,Long> temp=null;       
-            int Knotsize=in.readInt();           
-            for (int i=0;i < Knotsize;i++) {
-                temp = new LinkedHashMap<>(); 
-                for (int j=0,mapsize=in.readInt();j < mapsize;j++) {     
-                    temp.put(in.readUTF(), in.readLong());
+    private static final long serialVersionUID = 1L;
+    private static final String META_FILE_EXTENSION = ".ser";
+    private static final String COMMENT_PREFIX = "#";
+    private static final String SECTION_PREFIX = "[";
+    private static final String SECTION_SUFFIX = "]";
+    private static final String KEY_VALUE_SEPARATOR = ":";
+    private static final Set<String> Trankeys = new HashSet<>(Arrays.asList("displayText", "displayDescription", "text", "description", "isLockedMessage", "showMessageToAllEnemyPlayers", "isLockedAltMessage", "showMessageToPlayer", "cannotPlaceMessage", "showMessageToAllPlayer"));
+    public static final String MetaDir = "/sdcard/360/"; // "/sdcard/Android/data/com.eam.shuangx339.ModTranslater/cache/";
+    private File metaFile;
+    private transient RandomAccessFile randomAccessFile;
+    private boolean isClosed = false;
+    private int lines;
+
+    public File iniFile;
+    private Map<String, Map<String, Integer>> sectionMap;
+    private Map<Integer, Long> startPositionCache = new HashMap<>();
+
+    public static RWINI CreatInstance(File inifile, String projectName) throws FileNotFoundException, IOException, NoSuchAlgorithmException, ClassNotFoundException, RuntimeException {
+        // 判断传进来的File是否含有需要翻译的键，如果有返回实例并初始化变量，反之返回null
+        Map<String, Map<String, Integer>> sectionMap = new HashMap<>();
+        int i = 0;
+        try (BufferedReader reader = new BufferedReader(new FileReader(inifile))) {
+            Map<String, Integer> keymap = null;
+            String line;
+            while ((line = reader.readLine()) != null) {
+                i++;
+
+                if (line.startsWith(COMMENT_PREFIX)) {
+                    continue;
                 }
-                KnotList.put(in.readUTF(), temp);
+                if (line.startsWith(SECTION_PREFIX) && line.endsWith(SECTION_SUFFIX)) {
+                    String sectionName = line.substring(1, line.length() - 1).trim();
+                    sectionMap.put(sectionName, keymap = new HashMap<>());
+
+                } else if (keymap != null) {
+                    int separatorIndex;
+                    if ((separatorIndex = line.indexOf(KEY_VALUE_SEPARATOR)) == -1) separatorIndex = line.indexOf("=");
+                    if (separatorIndex >= 0) {
+                        String key = line.substring(0, separatorIndex).trim();
+                        if (Trankeys.contains(key))
+                            // 将所在列和行通过位运算压缩合并
+                            keymap.put(key, i << 5 | separatorIndex);
+                    }
+                }
             }
-        } finally {
-            in.close();
         }
-
-        initList();
-    }
-    public String getKnotBykey(String key) {
-        
-        for (Map.Entry en:KnotList.entrySet()) {
-            for (String enn:((Map<String,Long>)en.getValue()).keySet()) {
-                if (key.equals(enn))                   
-                    return en.getKey().toString();                    
-            }         
+        // 将sectionMap里面keymap空的删掉
+        Iterator<Map.Entry<String, Map<String, Integer>>> iterator = sectionMap.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, Map<String, Integer>> entry = iterator.next();
+            if (entry.getValue().isEmpty()) {
+                iterator.remove();
+            }
         }
-        return null;
-    }
-    public void init() throws IOException {
-        initKnotList();
-        initList();       
-        saveIniMap();
-    }
+        if (!sectionMap.isEmpty()) {
 
-    private void initKnotList() throws IOException {
-        KnotList = new LinkedHashMap<>();
-        LinkedHashMap<String,Long> knot = null;
-        int index;
-        String str;
-        //初始化内存中的索引map
-        db.seek(0);
-        while ((str = db.readLine()) != null) {
-            if (str.equals("") || str.startsWith("#"))continue;               
-            if (str.startsWith("["))
-                KnotList.put(str.trim(), knot = new LinkedHashMap<String,Long>());                            
+            String metafilename = MetaDir + projectName + "/" + getMetaFileName(inifile);
+            File metaFile = new File(metafilename);
+            if (metaFile.exists()) return Deserialize(metaFile);
             else {
-                index = str.indexOf(":");          
-                if (index == -1)index = str.indexOf("=");
-                knot.put(str.substring(0, index).trim(), db.getFilePointer() - (str.length() - index));                
-            } 
+                // 如果是空的
+                createMetaFile(metaFile, projectName);
+                return new RWINI(inifile, metaFile, sectionMap, i);
+            }
+        }
+        return null;
+    }
+
+    public RWINI(File iniFile, File metafile, Map<String, Map<String, Integer>> sectionMap, int lines) throws IOException {
+        this.metaFile = metafile;
+        this.iniFile = iniFile;
+        this.sectionMap = sectionMap;
+        this.lines = lines;
+        randomAccessFile = new RandomAccessFile(iniFile, "rw");
+        Serialize();
+    }
+
+    private static String getMD5(File iniFile) throws NoSuchAlgorithmException {
+        MessageDigest md = MessageDigest.getInstance("MD5");
+        md.update(iniFile.getParent().getBytes());
+        return bytesToHex(md.digest());
+    }
+
+    private static boolean createMetaFile(File inifile, String projectName) throws IOException, RuntimeException {
+        File metaDir = new File(MetaDir + projectName);
+        metaDir.mkdir();
+        File metafile = new File(metaDir, inifile.getName());
+
+        return metafile.createNewFile();
+    }
+
+    private static String getMetaFileName(File inifile) throws NoSuchAlgorithmException {
+        return String.format("%s_%s%s", getBaseName(inifile.getName()), getMD5(inifile), META_FILE_EXTENSION);
+    }
+
+    private static String bytesToHex(byte[] bytes) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : bytes) {
+            String hex = Integer.toHexString(b & 0xFF);
+            if (hex.length() == 1) {
+                sb.append('0');
+            }
+            sb.append(hex);
+        }
+        return sb.toString();
+    }
+
+    private static String getBaseName(String name) {
+        if (name.equals("")) return name;
+        return name.substring(0, name.lastIndexOf("."));
+    }
+
+    private static RWINI Deserialize(File metafile) throws FileNotFoundException, IOException, ClassNotFoundException {
+        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(metafile))) {
+            return (RWINI) ois.readObject();
         }
     }
-    private void initList() throws IOException {        
-        String ss = null;
-        for (Map.Entry en:KnotList.entrySet()) {
-            for (Map.Entry enn:((Map<String,Long>)en.getValue()).entrySet()) {
-                ss = enn.getKey().toString();
-                for (String s:FilesHandler.Trankeys)   
-                    if (ss.length() == s.length())
-                        if (s.equals(ss))
-                            isMeedTran = true;                                                 
-                allkeys.add(ss);                 
-                allvalues.add(new String(getData((long)enn.getValue()), "utf-8"));
-            }
-        }       
-        allvalues.trimToSize();
-        allkeys.trimToSize();
 
+    private void Serialize() throws IOException {
+        try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(metaFile))) {
+            oos.writeObject(this);
+        }
     }
 
-    private void saveIniMap() throws IOException {
-        DataOutputStream out = new DataOutputStream(new BufferedOutputStream(new FileOutputStream(MetaFile)));
+    public Map<String, Map<String, String>> getMap() throws IOException, IllegalArgumentException {
+        Map<String, Map<String, String>> result = new HashMap<>();
+        Map<String, String> map;
+        for (String s1 : sectionMap.keySet()) {
+            result.put(s1, map = new HashMap<String, String>());
+            for (String s2 : sectionMap.get(s1).keySet()) map.put(s2, getValue(s1, s2));
+        }
+        return result;
+    }
+
+    public String getValue(String section, String key) throws IOException, IllegalArgumentException {
+        int value = EnsureException(section, key);
+        // 取出行数和列数
+        int line = value >> 5;
+        int index = value & ((1 << 5) - 1);
         try {
-            out.writeInt(KnotList.size());
-            for (Map.Entry en:KnotList.entrySet()) {                
-                LinkedHashMap<String,Long> tempmap=(LinkedHashMap) en.getValue();
-                out.writeInt(tempmap.size());
-                for (Map.Entry enn:tempmap.entrySet()) {                   
-                    out.writeUTF(enn.getKey().toString());
-                    out.writeLong((long)(enn.getValue()));
+            randomAccessFile.seek(getStartPosition(line, index));          
+            return readTargetStringUntilNewLine();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    private long getStartPosition(int line, int index) throws IOException {
+        if (line >= lines) {
+            throw new IOException("Over lines");
+        }
+        Long cachedValue = startPositionCache.get(line);
+        if (cachedValue != null) {
+            return cachedValue;
+        }
+        randomAccessFile.seek(0);
+        for (int i = 1; i < line; i++) {
+            randomAccessFile.readLine();
+        }
+        Long startPosition = randomAccessFile.getFilePointer() + index + 1;
+        startPositionCache.put(line, startPosition);
+        return startPosition;
+    }
+
+    private String readTargetStringUntilNewLine() throws IOException {
+        StringBuilder stringBuilder = new StringBuilder();
+        int currentChar;
+        while ((currentChar = randomAccessFile.read()) != -1) {
+            if (currentChar == '\n') {
+                break;
+            }
+            stringBuilder.append((char) currentChar);
+        }
+        return stringBuilder.toString();
+    }
+
+    public void set(String sectionName, String key, String newvalue) throws IOException {
+
+        int value = EnsureException(sectionName, key);
+        int line = value >> 5;
+        int index = value & ((1 << 5) - 1);
+        long lastposition = getStartPosition(line, index);
+        randomAccessFile.seek(lastposition);
+        // 读取一行，计算value的字符串长度，如果新值的长度大于value的长度，则将其后的数据后移，反之则前移
+        System.out.println(randomAccessFile.readLine());
+        int SpaceLength = (int) (randomAccessFile.getFilePointer() - lastposition - 1);
+        System.out.println(SpaceLength);
+        int offset;
+        try (ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream()) {
+            if ((offset = newvalue.length() * 3 - SpaceLength) != 0) {
+                // 内容长度发生变化，需要重新计算偏移量并进行内容的重新写入
+                byte[] buffer = new byte[1024];
+                int bytesRead;
+                long currentPosition = randomAccessFile.getFilePointer();
+                while ((bytesRead = randomAccessFile.read(buffer)) != -1) {
+                    byteArrayOutputStream.write(buffer, 0, bytesRead);
                 }
-                out.writeUTF(en.getKey().toString());
-            }            
-        } finally {
-            out.close();
-        }
-    }
-
-    private byte[] getData(long pos) throws IOException {
-        db.seek(db.length() - 1);
-
-        if (db.readByte() != 10) {                      
-            db.setLength(db.length() + 1);
-            db.writeByte(10);
-        }
-        db.seek(pos);
-        ArrayList<Byte> arr=new ArrayList<>();
-        Byte b ;
-        while ((b = db.readByte()) != 10)
-            arr.add(b);
-
-        Byte[] BigByte=arr.toArray(new Byte[0]);
-        return toPrimitives(BigByte);
-    }
-    private byte[] toPrimitives(Byte[] oBytes) {
-        byte[] bytes = new byte[oBytes.length];
-
-        for (int i = 0; i < oBytes.length; i++) 
-            bytes[i] = oBytes[i];
-
-
-        return bytes;
-    }
-    private void writeData(long pos, byte[] data) throws IOException {
-
-        db.seek(pos);
-        int size=data.length,srclen = 0;
-        if (pos == db.length()) {           
-            db.setLength(db.length() + data.length);    
-        } else {    
-            while (db.readByte() != 10)srclen++;            
-            ensureLength(pos, size, srclen);
-            db.seek(pos);
-        }
-
-        db.write(data);
-
-    }
-    private void ensureLength(long pos, int datalen, int srclen) {
-
-        try {
-            long pd=pos + datalen,ps=pos + srclen;
-            db.seek(pd);
-            if (datalen <= srclen) {
-                for (int i=0;i < (srclen - datalen);i++)
-                    db.writeByte(0);
-            } else {     
-                db.seek(ps);
-                long Diff=datalen - srclen;
-                db.setLength(db.length() + Diff);               
-                byte[] b=new byte[(int)(db.length() - ps)];
-                db.read(b);  
-                db.seek(pd);
-                db.write(b);      
-                initKnotList();
+                randomAccessFile.seek(currentPosition + offset - 1);
+                randomAccessFile.writeByte(0x0A);
+                randomAccessFile.write(byteArrayOutputStream.toByteArray());
+                randomAccessFile.setLength(randomAccessFile.length() + offset);
             }
-        } catch (IOException e) {}
-
+            // 回写新值
+            randomAccessFile.seek(lastposition);
+            randomAccessFile.write(newvalue.getBytes());
+        }
     }
 
-    private long nextAvailablePos() throws IOException {
-        return db.length();
-
-    }
-    private Long getPos(String key) {
-
-        Object pos = null;
-        for (LinkedHashMap en:KnotList.values()) {            
-            if ((pos = en.get(key)) != null)              
-                return (Long)pos;
-
+    private Integer EnsureException(String sectionName, String key) throws IOException, IllegalArgumentException {
+        if (isClosed) {
+            throw new IOException("INI file has been closed");
+        }
+        if (!sectionMap.containsKey(sectionName)) {
+            throw new IllegalArgumentException("Invalid section name: " + sectionName);
         }
 
-        return null;
-    }
-    private static <K, V> K getKeyByLoop(Map<K, V> map, V value) {
-        for (Map.Entry<K, V> entry : map.entrySet()) {
-            if (Objects.equals(entry.getValue(), value)) {
-                return entry.getKey();
-            }
+        Map map = sectionMap.get(sectionName);
+        if (!map.containsKey(key)) {
+            throw new IllegalArgumentException("Invalid key: " + key);
         }
-        return null;
-    }
-    public void put(String key, byte[] value) throws IOException {
-        Long index = getPos(key);
-        if (index == null) 
-            index = nextAvailablePos();   
-
-        writeData(index, value);
+        return (Integer) map.get(key);
     }
 
-    public byte[] get(String key) throws IOException {
-        Long index = getPos(key);
-
-        if (index != null) 
-            return getData(index);
-
-        return null;
+    private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+        in.defaultReadObject();
+        randomAccessFile = new RandomAccessFile(iniFile, "rw");
     }
-
-    public boolean remove(String key) {
-        Long index =getPos(key);
-        if (index != null) {
-
-
-            return true;
-
-        }
-        return false;
-    }
-
     public void flush() throws IOException {
-        saveIniMap();
-        db.getFD().sync();
+		Serialize();
+        randomAccessFile.getFD().sync();
     }
 
     public void close() throws IOException {
-        flush();
-        db.close();
+        if (!isClosed) {
+            if (randomAccessFile != null) {
+                flush();
+                randomAccessFile.close();
+                randomAccessFile = null;
+            }
+            isClosed = true;
+        }
     }
-
-
 }
